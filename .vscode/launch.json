@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:dock-extender}",
+            "name": "Debug DockExtender",
+            "target": "DockExtender",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug DockExtender"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:dock-extender}",
+            "name": "Release DockExtender",
+            "target": "DockExtender",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release DockExtender"
+        }
+    ]
+}
