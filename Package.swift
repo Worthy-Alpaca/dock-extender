@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "DockExtender",
             path: "Sources/DockExtender"
-        )
+        ),
+        .testTarget(
+            name: "DockExtenderTests",
+            dependencies: ["DockExtender"],
+            path: "Tests/DockExtenderTests"
+        ),
     ]
 )

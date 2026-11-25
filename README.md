@@ -49,6 +49,36 @@ Mac.
 
 During development, `swift run` starts it straight from the package.
 
+## Tests
+
+```bash
+./Scripts/test.sh
+```
+
+The tests cover what is plain logic: how bars are sized and placed, what the
+app remembers about the Dock's depth, clicks and drags on controls, the audio
+widget's state, and number formatting. What needs a real Dock, a real audio
+device or a real mouse is not covered. (The script is `swift test`, plus a
+flag the compiler needs when only the Command Line Tools are installed.)
+
+## Releases
+
+`.github/workflows/build.yml` tests and builds every push to `main` and every
+pull request. Pushing a version tag also publishes that build as a GitHub
+release, with the zipped app attached and the tag's version in the app:
+
+```bash
+git tag v1.1.0
+```
+
+```bash
+git push origin v1.1.0
+```
+
+The released app is signed ad hoc and not notarized by Apple, so macOS will
+not open a downloaded copy straight away: open it once, then allow it under
+System Settings › Privacy & Security.
+
 ## Adding a widget
 
 A widget is one type conforming to `DockWidget`, plus one line in a group in
@@ -102,6 +132,9 @@ templates.
 | `Sources/DockExtender/UI` | Shared SwiftUI building blocks |
 | `Sources/DockExtender/Dock` | Finding the Dock, the bars' windows, layout, sliding |
 | `Sources/DockExtender/App` | App delegate, settings, developer snapshot tool |
+| `Tests/DockExtenderTests` | Tests for the logic that needs no Dock, device or mouse |
+| `Scripts` | Building the app bundle, running the tests |
+| `.github/workflows` | Test, build and release on GitHub |
 
 ## How it follows the Dock
 

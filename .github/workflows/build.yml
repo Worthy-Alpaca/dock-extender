@@ -1,0 +1,48 @@
+name: Build
+
+# Every push to main and every pull request is tested and built.
+# Pushing a tag such as v1.2.0 also publishes the app as a GitHub release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    # GitHub's Xcode 27 image: macOS 27 with the toolchain the project is
+    # developed with. (The app needs the macOS 26 SDK or later to build.)
+    runs-on: xcode-27
+    timeout-minutes: 15
+    permissions:
+      contents: write # lets a tag build create its release
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test
+        run: ./Scripts/test.sh
+
+      - name: Build the app
+        run: ./Scripts/build-app.sh
+        env:
+          # A tag build carries the tag's version; any other build the one in
+          # Resources/Info.plist.
+          APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+      - name: Package
+        run: ditto -c -k --keepParent build/DockExtender.app DockExtender.zip
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: >-
+            **Installing:** unzip, move Dock Extender to Applications and open
+            it. The app is not notarized by Apple, so macOS refuses the first
+            time: allow it under System Settings › Privacy & Security
+            (Open Anyway), then open it again.
+        run: |
+          gh release create "$GITHUB_REF_NAME" DockExtender.zip \
+            --title "Dock Extender ${GITHUB_REF_NAME#v}" \
+            --notes "$NOTES" \
+            --generate-notes
