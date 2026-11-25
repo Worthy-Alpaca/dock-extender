@@ -75,6 +75,10 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
+The newest release is titled "Dock Extender latest". When the next one is
+published, the workflow renames the one before to the version it carries
+("Dock Extender 1.0").
+
 The released app is signed ad hoc and not notarized by Apple, so macOS will
 not open a downloaded copy straight away: open it once, then allow it under
 System Settings › Privacy & Security.

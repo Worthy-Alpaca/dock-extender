@@ -36,13 +36,23 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          # What the newest release is called.
+          LATEST: Dock Extender latest
           NOTES: >-
             **Installing:** unzip, move Dock Extender to Applications and open
             it. The app is not notarized by Apple, so macOS refuses the first
             time: allow it under System Settings › Privacy & Security
             (Open Anyway), then open it again.
         run: |
+          # The release that was the newest until now goes back to being
+          # called by the version it carries: v1.0 becomes "Dock Extender 1.0".
+          gh release list --json tagName,name \
+            --jq ".[] | select(.name == \"$LATEST\") | .tagName" |
+            while read -r tag; do
+              gh release edit "$tag" --title "Dock Extender ${tag#v}"
+            done
+
           gh release create "$GITHUB_REF_NAME" DockExtender.zip \
-            --title "Dock Extender latest" \
+            --title "$LATEST" \
             --notes "$NOTES" \
             --generate-notes
