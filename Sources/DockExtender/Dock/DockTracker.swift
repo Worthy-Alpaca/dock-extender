@@ -27,11 +27,11 @@ final class DockTracker {
 
     /// False when the panel should stay on screen regardless of the Dock.
     var followsDock = true
-    /// True while a popover or menu is open; holds the panel in place.
+    /// True while a detail card or menu is open; holds the bars in place.
     var isPinned = false
     /// Screen area of the revealed panel. Resting the pointer here keeps the
     /// panel up even if the Dock itself has gone.
-    var hoverRegion = CGRect.null
+    var hoverRegions: [CGRect] = []
 
     /// Ticks per second for each situation.
     private enum Rate: Double {
@@ -151,7 +151,7 @@ final class DockTracker {
                 // though: the Dock stays up for those (resizing it by its
                 // divider is one), so then only its window going away counts.
                 setPresent(false, because: "pointer left the strip, depth \(Int(depth))")
-            } else if trackingTick % 2 == 0, !hoverRegion.contains(pointer), !isDockWindowOnScreen() {
+            } else if trackingTick % 2 == 0, !hoverRegions.contains(where: { $0.contains(pointer) }), !isDockWindowOnScreen() {
                 setPresent(false, because: "Dock window gone, pointer depth \(Int(depth))")
             }
         } else if depth < 2 {

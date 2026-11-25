@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>The play, pause and skip buttons in the Audio widget work by sending these commands to the player.</string>
 </dict>
 </plist>

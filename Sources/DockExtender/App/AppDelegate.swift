@@ -10,14 +10,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let widgets = WidgetRegistry.makeAll()
-        let controller = DockPanelController(settings: Settings(), widgets: widgets)
+        let controller = DockPanelController(settings: Settings(), groups: WidgetRegistry.makeGroups())
         controller.start()
         self.controller = controller
 
         // Developer aid: `DockExtender --snapshot out.png` renders every tile and
-        // detail view to an image after a few samples, captures the live panel
-        // (and a popover, when the panel is showing), then quits.
+        // detail view to an image after a few samples, captures each bar's
+        // window and the card of its first tile, then quits.
         if let path = Self.argument(after: "--snapshot") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                 MainActor.assumeIsolated {

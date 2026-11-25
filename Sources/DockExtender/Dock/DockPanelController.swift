@@ -2,57 +2,47 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// Owns the panel: builds the tiles, keeps the window glued to the Dock, slides
-/// it in and out with the Dock, and handles clicks and the right-click menu.
+/// Runs the bars: one per widget group, each its own window next to the Dock.
+///
+/// Everything the bars share lives here: following the Dock, sampling the
+/// widgets, deciding where each bar sits, sliding them in and out together,
+/// and the right-click menu.
 @MainActor
 final class DockPanelController {
     private let settings: Settings
-    private let allWidgets: [any DockWidget]
+    private let bars: [BarController]
     private let scheduler = SampleScheduler()
     private let tracker = DockTracker()
 
-    private let panel = DockPanel()
-    private let slider: WindowSlider
-    private let glass = NSGlassEffectView()
-    private let strip = StripView()
-
-    private var tileWidgets: [any DockWidget] = []
-    private var tiles: [TileView] = []
-    private var layout: PanelLayout?
+    private var isRevealed = false
     /// Set when a new layout arrives mid-slide; applied once the slide ends.
     private var needsRelayout = false
-    private var isRevealed = false
     private var slideDuration = DockPreferences.slideDuration
-
-    private var popover: NSPopover?
-    private var popoverWidgetID: String?
-    private var outsideClickMonitor: Any?
     private var isMenuOpen = false
     private var sleepObservers: [NSObjectProtocol] = []
 
-    init(settings: Settings, widgets: [any DockWidget]) {
+    init(settings: Settings, groups: [WidgetGroup]) {
         self.settings = settings
-        self.allWidgets = widgets
-        self.slider = WindowSlider(window: panel)
+        self.bars = groups.map(BarController.init)
     }
 
     func start() {
-        let root = NSView()
-        root.wantsLayer = true
-        panel.contentView = root
-        strip.autoresizingMask = [.width, .height]
-        glass.contentView = strip
-        root.addSubview(glass)
-
-        strip.onClick = { [weak self] in self?.closePopover() }
-        strip.onMenu = { [weak self] event in self?.showMenu(for: event) }
+        for bar in bars {
+            bar.onMenu = { [weak self, weak bar] event in
+                guard let bar else { return }
+                self?.showMenu(for: event, on: bar)
+            }
+            bar.onCardWillOpen = { [weak self, weak bar] in
+                self?.bars.filter { $0 !== bar }.forEach { $0.closeCard() }
+            }
+            bar.onCardChange = { [weak self] in self?.updatePinned() }
+        }
         settings.onChange = { [weak self] in self?.settingsChanged() }
         tracker.onGeometryChange = { [weak self] in self?.geometryChanged() }
         tracker.onPresenceChange = { [weak self] present in self?.setRevealed(present) }
 
-        rebuildTiles()
+        showWidgets()
         applyMode()
-        scheduler.run(tileWidgets, intervalScale: settings.intervalScale)
         tracker.start()
 
         // Nothing to show or follow while the display is asleep.
@@ -74,39 +64,80 @@ final class DockPanelController {
     }
 
     /// Developer aid, see `Snapshot`: writes the tile and detail views to
-    /// `url`, and the live panel window next to it.
+    /// `url`, and next to it each bar's live window and the card of its first
+    /// tile as the window server draws them.
     func writeSnapshots(to url: URL, completion: @escaping () -> Void) {
-        Log.debug("window visible=\(panel.isVisible) frame=\(panel.frame) glass=\(glass.frame) strip=\(strip.frame)")
         scheduler.isPublishing = true
         let base = url.deletingPathExtension()
-        Snapshot.write(widgets: allWidgets, to: url)
-        Snapshot.capture(window: panel, to: base.appendingPathExtension("window.png"))
+        Snapshot.write(widgets: bars.flatMap { $0.group.widgets }, to: url)
 
-        // Exercise the click path too: open the first tile's popover and
-        // capture it once it has finished appearing.
-        guard panel.isVisible, let tile = tiles.first else {
-            completion()
-            return
-        }
-        togglePopover(for: tile)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-            MainActor.assumeIsolated {
-                if let window = self?.popover?.contentViewController?.view.window {
-                    Log.debug("popover frame=\(window.frame)")
-                    Snapshot.capture(window: window, to: base.appendingPathExtension("popover.png"))
-                }
+        // One bar after the other, since only one card is open at a time.
+        // Each card gets a moment to fade in and take its final size.
+        func capture(_ remaining: ArraySlice<BarController>) {
+            guard let bar = remaining.first else {
                 completion()
+                return
+            }
+            let name = bar.group.id
+            Log.debug("\(name) window visible=\(bar.window.isVisible) frame=\(bar.window.frame)")
+            Snapshot.capture(window: bar.window, to: base.appendingPathExtension("\(name).bar.png"))
+            guard let card = bar.openFirstCard() else {
+                capture(remaining.dropFirst())
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                MainActor.assumeIsolated {
+                    Log.debug("\(name) card frame=\(card.frame)")
+                    Snapshot.capture(window: card, to: base.appendingPathExtension("\(name).card.png"))
+                    bar.closeCard()
+                    capture(remaining.dropFirst())
+                }
             }
         }
+        capture(shownBars[...])
+    }
+
+    // MARK: - Bars
+
+    /// The bars that are switched on.
+    private var shownBars: [BarController] {
+        let hidden = settings.hiddenBars
+        return bars.filter { !hidden.contains($0.group.id) }
+    }
+
+    /// Which end of the Dock a bar sits at. Until the user chooses, the first
+    /// bar takes the Trash end and every other bar the end opposite the first,
+    /// so that a new bar gets a place of its own.
+    private func side(of bar: BarController) -> Settings.Side {
+        if let chosen = settings.side(ofBar: bar.group.id) {
+            return chosen
+        }
+        guard let first = bars.first, bar !== first else { return .trailing }
+        return side(of: first).opposite
+    }
+
+    /// Gives every bar its tiles and tells the scheduler what to sample.
+    private func showWidgets() {
+        let hidden = settings.hiddenWidgets
+        let shown = shownBars
+        for bar in bars {
+            if shown.contains(where: { $0 === bar }) {
+                bar.showWidgets(except: hidden)
+            } else {
+                bar.remove()
+            }
+        }
+        scheduler.run(shown.flatMap(\.widgets), intervalScale: settings.intervalScale)
     }
 
     // MARK: - Reacting to changes
 
     private func settingsChanged() {
-        rebuildTiles()
-        scheduler.run(tileWidgets, intervalScale: settings.intervalScale)
+        showWidgets()
         applyMode()
         relayout()
+        // A bar that was just switched on joins the others where they are.
+        slide()
         tracker.refresh()
     }
 
@@ -119,67 +150,68 @@ final class DockPanelController {
     private func applyMode() {
         let follows = !settings.keepVisible
         tracker.followsDock = follows
-        panel.setFollowsDock(follows && tracker.geometry?.autohide == true)
+        bars.forEach { $0.setFollowsDock(follows && tracker.geometry?.autohide == true) }
     }
 
-    private func rebuildTiles() {
-        let hidden = settings.hiddenWidgets
-        let widgets = allWidgets.filter { !hidden.contains($0.info.id) }
-        guard widgets.map({ $0.info.id }) != tileWidgets.map({ $0.info.id }) else { return }
-
-        closePopover()
-        tiles.forEach { $0.removeFromSuperview() }
-        tileWidgets = widgets
-        tiles = widgets.map { widget in
-            let tile = TileView(widget: widget, scale: layout?.contentScale ?? 1)
-            tile.onClick = { [weak self, weak tile] in
-                guard let tile else { return }
-                self?.togglePopover(for: tile)
-            }
-            tile.onMenu = { [weak self] event in self?.showMenu(for: event) }
-            strip.addSubview(tile)
-            return tile
-        }
-        layout = nil
-    }
-
+    /// Places the bars: at each end of the Dock, the first bar sits against
+    /// the Dock and the next against that one. Bars set to the same end share
+    /// the room there, shrinking as far as they can; only when that is not
+    /// enough does one go to the other end rather than on top of its
+    /// neighbour.
     private func relayout() {
-        // Resizing the window under a running slide would make it jump, and
-        // the tiles are about to move anyway: wait for the slide to finish.
-        guard !slider.isRunning else {
+        // Resizing a window under a running slide would make it jump, and the
+        // bars are about to move anyway: wait for the slide to finish.
+        guard !bars.contains(where: \.isSliding) else {
             needsRelayout = true
             return
         }
         needsRelayout = false
         guard let dock = tracker.geometry else { return }
-        let fresh = PanelLayout.make(
-            dock: dock,
-            side: settings.side,
-            widthFactors: tileWidgets.map { $0.info.widthFactor }
-        )
-        guard fresh != layout else { return }
-        Log.debug("layout shown=\(fresh.shownFrame) bar=\(fresh.barFrame) tiles=\(fresh.tileFrames.count) scale=\(fresh.contentScale)")
 
-        closePopover()
-        layout = fresh
-        slider.cancel()
-        panel.setFrame(isRevealed ? fresh.shownFrame : fresh.hiddenFrame, display: false)
-        glass.frame = fresh.barFrame
-        glass.cornerRadius = fresh.cornerRadius
-        strip.frame = glass.bounds
-        for (index, tile) in tiles.enumerated() {
-            if index < fresh.tileFrames.count {
-                tile.isHidden = false
-                tile.frame = fresh.tileFrames[index]
-                tile.setScale(fresh.contentScale)
+        var taken: [Settings.Side: CGFloat] = [:]
+        var regions: [CGRect] = []
+        func place(_ bar: BarController, _ layout: PanelLayout, at side: Settings.Side) {
+            bar.apply(layout)
+            taken[side, default: 0] += layout.length + PanelLayout.spacing
+            regions.append(layout.shownFrame)
+        }
+        func widths(of bar: BarController) -> [CGFloat] {
+            bar.widgets.map { $0.info.widthFactor }
+        }
+
+        // First the ends where everything set to be there fits together.
+        let shown = shownBars
+        var crowded: [BarController] = []
+        for side in [Settings.Side.leading, .trailing] {
+            let here = shown.filter { self.side(of: $0) == side }
+            if let shares = PanelLayout.share(dock: dock, side: side, among: here.map(widths)) {
+                for (bar, share) in zip(here, shares) {
+                    place(bar, PanelLayout.make(dock: dock, side: side, share: share, taken: taken[side, default: 0]), at: side)
+                }
             } else {
-                tile.isHidden = true
+                crowded += here
             }
         }
-        tracker.hoverRegion = fresh.shownFrame
-        if isRevealed {
-            panel.orderFrontRegardless()
+
+        // Then the bars of an end that is too crowded even so. Each tries
+        // what room is left at its own end; if another bar has taken that,
+        // the other end; and failing both, stays put with as many tiles as
+        // fit.
+        for bar in crowded {
+            let chosen = side(of: bar)
+            let ends = taken[chosen, default: 0] > 0 ? [chosen, chosen.opposite] : [chosen]
+            let fitting = ends.lazy.compactMap { side -> (Settings.Side, PanelLayout.Share)? in
+                let room = taken[side, default: 0]
+                return PanelLayout.share(dock: dock, side: side, among: [widths(of: bar)], taken: room)?.first.map { (side, $0) }
+            }.first
+            if let (side, share) = fitting {
+                place(bar, PanelLayout.make(dock: dock, side: side, share: share, taken: taken[side, default: 0]), at: side)
+            } else {
+                let room = taken[chosen, default: 0]
+                place(bar, PanelLayout.make(dock: dock, side: chosen, widthFactors: widths(of: bar), taken: room), at: chosen)
+            }
         }
+        tracker.hoverRegions = regions
     }
 
     // MARK: - Sliding in and out
@@ -191,98 +223,44 @@ final class DockPanelController {
             // Bring the tiles up to date before they slide into view.
             scheduler.isPublishing = true
         }
-        guard let layout else { return }
-        let screen = NSScreen.screens.first { $0.frame == tracker.geometry?.screenFrame }
+        slide()
+    }
 
-        if revealed {
-            if !panel.isVisible {
-                panel.setFrame(layout.hiddenFrame, display: true)
-                panel.orderFrontRegardless()
-            }
-            let started = CACurrentMediaTime()
-            slider.slide(to: layout.shownFrame, duration: slideDuration, curve: .easeOut, on: screen) { [weak self] in
-                Log.debug("slide in finished \(Int((CACurrentMediaTime() - started) * 1000)) ms after the decision to show")
-                self?.relayoutIfNeeded()
-            }
-        } else {
-            closePopover()
-            tiles.forEach { $0.setHighlighted(false) }
-            slider.slide(to: layout.hiddenFrame, duration: slideDuration, curve: .easeIn, on: screen) { [weak self] in
-                guard let self, !self.isRevealed else { return }
-                // Once ordered out the window costs nothing to composite, and
-                // the views stop updating until the next reveal.
-                self.panel.orderOut(nil)
-                self.scheduler.isPublishing = false
-                self.slideDuration = DockPreferences.slideDuration
-                self.relayoutIfNeeded()
+    /// Moves every bar that is not yet where `isRevealed` says it belongs.
+    private func slide() {
+        let screen = NSScreen.screens.first { $0.frame == tracker.geometry?.screenFrame }
+        for bar in shownBars {
+            bar.setRevealed(isRevealed, duration: slideDuration, on: screen) { [weak self] in
+                self?.slideFinished()
             }
         }
     }
 
-    private func relayoutIfNeeded() {
+    private func slideFinished() {
+        guard !bars.contains(where: \.isSliding) else { return }
+        if !isRevealed {
+            // With the bars off screen the views stop updating until the next
+            // reveal.
+            scheduler.isPublishing = false
+            slideDuration = DockPreferences.slideDuration
+        }
         if needsRelayout {
             relayout()
         }
     }
 
-    // MARK: - Detail popover
-
-    private func togglePopover(for tile: TileView) {
-        let id = tile.widgetID
-        let wasOpen = popoverWidgetID == id
-        closePopover()
-        guard !wasOpen, let layout, let widget = allWidgets.first(where: { $0.info.id == id }) else { return }
-
-        let content = NSHostingController(rootView: widget.detailView)
-        content.sizingOptions = .preferredContentSize
-        let popover = NSPopover()
-        popover.contentViewController = content
-        // The app is never active, so AppKit's own "click elsewhere to dismiss"
-        // does not fire; closing is handled by the monitor below.
-        popover.behavior = .applicationDefined
-
-        let edge: NSRectEdge
-        switch layout.edge {
-        case .bottom: edge = .maxY
-        case .left: edge = .maxX
-        case .right: edge = .minX
-        }
-        popover.show(relativeTo: tile.bounds, of: tile, preferredEdge: edge)
-
-        self.popover = popover
-        popoverWidgetID = id
-        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.closePopover() }
-        }
-        updatePinned()
-    }
-
-    private func closePopover() {
-        guard let popover else { return }
-        self.popover = nil
-        popoverWidgetID = nil
-        if let outsideClickMonitor {
-            NSEvent.removeMonitor(outsideClickMonitor)
-        }
-        outsideClickMonitor = nil
-        popover.close()
-        updatePinned()
-    }
-
-    /// Hold the panel in place while something that belongs to it is open,
+    /// Hold the bars in place while something that belongs to them is open,
     /// even though the pointer has left the Dock's strip.
     private func updatePinned() {
-        tracker.isPinned = popover != nil || isMenuOpen
+        tracker.isPinned = isMenuOpen || bars.contains(where: \.hasCard)
     }
 
     // MARK: - Right-click menu
 
-    private func showMenu(for event: NSEvent) {
-        guard let view = panel.contentView else { return }
-        closePopover()
-        let menu = buildMenu()
+    private func showMenu(for event: NSEvent, on bar: BarController) {
+        guard let view = bar.menuAnchor else { return }
+        bars.forEach { $0.closeCard() }
+        let menu = buildMenu(for: bar)
         isMenuOpen = true
         updatePinned()
         // Runs its own event loop and returns once the menu closes.
@@ -291,42 +269,72 @@ final class DockPanelController {
         updatePinned()
     }
 
-    private func buildMenu() -> NSMenu {
+    /// The menu for a right-click on `bar`: what is specific to that bar (its
+    /// widgets, its position) and what applies to the whole app.
+    private func buildMenu(for bar: BarController) -> NSMenu {
         let settings = self.settings
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        // Widgets
-        let hidden = settings.hiddenWidgets
-        let shownCount = allWidgets.filter { !hidden.contains($0.info.id) }.count
-        menu.addItem(.sectionHeader(title: "Widgets"))
-        for widget in allWidgets {
-            let info = widget.info
-            let isShown = !hidden.contains(info.id)
-            let item = ActionMenuItem(info.title, checked: isShown) {
-                var hidden = settings.hiddenWidgets
+        // Bars
+        let hiddenBars = settings.hiddenBars
+        let shownBarCount = bars.count - hiddenBars.intersection(bars.map(\.group.id)).count
+        menu.addItem(.sectionHeader(title: "Bars"))
+        for other in bars {
+            let group = other.group
+            let isShown = !hiddenBars.contains(group.id)
+            let item = ActionMenuItem(group.title, checked: isShown) {
+                var hidden = settings.hiddenBars
                 if isShown {
-                    hidden.insert(info.id)
+                    hidden.insert(group.id)
                 } else {
-                    hidden.remove(info.id)
+                    hidden.remove(group.id)
                 }
-                settings.hiddenWidgets = hidden
+                settings.hiddenBars = hidden
             }
-            item.image = NSImage(systemSymbolName: info.symbol, accessibilityDescription: nil)
-            // The panel is the app's only UI, so the last widget cannot be removed.
-            item.isEnabled = !(isShown && shownCount == 1)
+            item.image = NSImage(systemSymbolName: group.symbol, accessibilityDescription: nil)
+            // The bars are the app's only UI, so the last one cannot be removed.
+            item.isEnabled = !(isShown && shownBarCount == 1)
             menu.addItem(item)
         }
         menu.addItem(.separator())
 
-        // Position
+        // Widgets of this bar. A bar with a single widget has nothing to choose.
+        let widgets = bar.group.widgets
+        if widgets.count > 1 {
+            let hidden = settings.hiddenWidgets
+            let shownCount = widgets.filter { !hidden.contains($0.info.id) }.count
+            menu.addItem(.sectionHeader(title: "\(bar.group.title) Widgets"))
+            for widget in widgets {
+                let info = widget.info
+                let isShown = !hidden.contains(info.id)
+                let item = ActionMenuItem(info.title, checked: isShown) {
+                    var hidden = settings.hiddenWidgets
+                    if isShown {
+                        hidden.insert(info.id)
+                    } else {
+                        hidden.remove(info.id)
+                    }
+                    settings.hiddenWidgets = hidden
+                }
+                item.image = NSImage(systemSymbolName: info.symbol, accessibilityDescription: nil)
+                // An empty bar could not be right-clicked to bring them back.
+                item.isEnabled = !(isShown && shownCount == 1)
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+
+        // Position of this bar
         let isBottom = (tracker.geometry?.edge ?? .bottom) == .bottom
+        let side = side(of: bar)
+        let barID = bar.group.id
         let position = NSMenu()
-        position.addItem(ActionMenuItem(isBottom ? "Left of Dock" : "Above Dock", checked: settings.side == .leading) {
-            settings.side = .leading
+        position.addItem(ActionMenuItem(isBottom ? "Left of Dock" : "Above Dock", checked: side == .leading) {
+            settings.setSide(.leading, ofBar: barID)
         })
-        position.addItem(ActionMenuItem(isBottom ? "Right of Dock" : "Below Dock", checked: settings.side == .trailing) {
-            settings.side = .trailing
+        position.addItem(ActionMenuItem(isBottom ? "Right of Dock" : "Below Dock", checked: side == .trailing) {
+            settings.setSide(.trailing, ofBar: barID)
         })
         menu.addItem(submenu("Position", position))
 

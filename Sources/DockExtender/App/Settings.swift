@@ -3,9 +3,11 @@ import Foundation
 /// User preferences, persisted in UserDefaults.
 @MainActor
 final class Settings {
-    /// Which end of the Dock the panel attaches to. Trailing is the Trash end.
+    /// Which end of the Dock a bar attaches to. Trailing is the Trash end.
     enum Side: String {
         case leading, trailing
+
+        var opposite: Side { self == .leading ? .trailing : .leading }
     }
 
     /// Called after any preference changes.
@@ -13,9 +15,26 @@ final class Settings {
 
     private let defaults = UserDefaults.standard
 
-    var side: Side {
-        get { Side(rawValue: defaults.string(forKey: "side") ?? "") ?? .trailing }
-        set { defaults.set(newValue.rawValue, forKey: "side"); onChange?() }
+    /// The end of the Dock chosen for a bar, or nil while it is left to the
+    /// default.
+    func side(ofBar id: String) -> Side? {
+        Side(rawValue: defaults.string(forKey: sideKey(id)) ?? "")
+    }
+
+    func setSide(_ side: Side, ofBar id: String) {
+        defaults.set(side.rawValue, forKey: sideKey(id))
+        onChange?()
+    }
+
+    /// The system bar keeps the key it had when it was the only bar.
+    private func sideKey(_ bar: String) -> String {
+        bar == "system" ? "side" : "side.\(bar)"
+    }
+
+    /// IDs of the bars the user switched off.
+    var hiddenBars: Set<String> {
+        get { Set(defaults.stringArray(forKey: "hiddenBars") ?? []) }
+        set { defaults.set(newValue.sorted(), forKey: "hiddenBars"); onChange?() }
     }
 
     /// IDs of widgets the user switched off. Storing the hidden set (rather than
@@ -34,7 +53,7 @@ final class Settings {
         set { defaults.set(newValue, forKey: "intervalScale"); onChange?() }
     }
 
-    /// With an auto-hiding Dock: keep the panel on screen instead of sliding
+    /// With an auto-hiding Dock: keep the bars on screen instead of sliding
     /// away with the Dock.
     var keepVisible: Bool {
         get { defaults.bool(forKey: "keepVisible") }

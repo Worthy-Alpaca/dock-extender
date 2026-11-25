@@ -66,9 +66,9 @@ private struct GraphWell: ViewModifier {
     }
 }
 
-// MARK: - Detail popover building blocks
+// MARK: - Detail card building blocks
 
-/// Frame for a widget's detail popover: icon, title and headline value,
+/// Frame for a widget's detail card: icon, title and headline value,
 /// followed by whatever the widget wants to show.
 struct DetailCard<Content: View>: View {
     let title: String
@@ -94,7 +94,7 @@ struct DetailCard<Content: View>: View {
     }
 }
 
-/// One "label ... value" line in a detail popover.
+/// One "label ... value" line in a detail card.
 struct StatRow: View {
     let label: String
     let value: String
@@ -114,7 +114,7 @@ struct StatRow: View {
 }
 
 extension View {
-    /// Sizing and backing for the large graph at the top of a detail popover.
+    /// Sizing and backing for the large graph at the top of a detail card.
     func detailGraph(height: CGFloat = 48) -> some View {
         frame(height: height)
             .frame(maxWidth: .infinity)

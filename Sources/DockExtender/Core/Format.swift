@@ -24,6 +24,16 @@ enum Format {
         scaled(max(bytesPerSecond, 0) / 1000, base: 1000, units: ["KB", "MB", "GB"])
     }
 
+    /// "45 s", "12 min", "3 h 05 min": how long something has been going on.
+    static func duration(_ seconds: TimeInterval) -> String {
+        let seconds = Int(max(seconds, 0))
+        switch seconds {
+        case ..<60: return "\(seconds) s"
+        case ..<3600: return "\(seconds / 60) min"
+        default: return String(format: "%d h %02d min", seconds / 3600, seconds % 3600 / 60)
+        }
+    }
+
     private static func scaled(_ value: Double, base: Double, units: [String]) -> String {
         var value = value
         var index = 0

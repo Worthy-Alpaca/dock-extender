@@ -11,11 +11,32 @@ struct WidgetInfo: Sendable {
     /// Seconds between calls to `read()`.
     var interval: TimeInterval = 1
     /// Tile width as a multiple of the Dock icon size (bottom Dock only;
-    /// tiles are always square in a vertical Dock).
+    /// tiles are always square in a vertical Dock). A tile wider than one
+    /// icon gets less when room is short, down to one icon's width, so it
+    /// must be able to draw itself that narrow.
     var widthFactor: CGFloat = 1
 }
 
-/// One tile in the panel.
+/// A part of a tile, or of a detail card, that takes the mouse itself. The
+/// widget draws it as part of its view; the view hosting that handles the
+/// mouse, as it does for the tile as a whole.
+struct TileControl {
+    enum Kind {
+        /// Acts when clicked.
+        case button(@MainActor () -> Void)
+        /// Follows the mouse while it is held down. Called with the pointer's
+        /// place in the tile when the mouse goes down, whenever it moves, and
+        /// when it comes up, also when it has strayed outside the control.
+        case slider(@MainActor (CGPoint) -> Void)
+    }
+
+    /// Where it is in the tile or card, in the coordinates SwiftUI lays that
+    /// out in: points, origin at the top left. Mouse positions use the same.
+    let frame: CGRect
+    let kind: Kind
+}
+
+/// One tile in a bar.
 ///
 /// A widget splits its work in two so the UI never waits on the system:
 /// `read()` runs on a background queue and gathers numbers, `apply(_:)` runs on
@@ -41,11 +62,21 @@ protocol DockWidget: AnyObject, Sendable {
     /// fonts and spacing with the `tileScale` environment value.
     @ViewBuilder var tile: Tile { get }
 
-    /// Larger view shown in a popover when the tile is clicked.
+    /// Larger view shown in a card next to the tile when the tile is clicked.
     @ViewBuilder var detail: Detail { get }
+
+    /// The controls in the tile when it is drawn at `size`. Most widgets have
+    /// none, and need not implement this.
+    func controls(in size: CGSize, scale: CGFloat) -> [TileControl]
+
+    /// The controls in the detail card when it is drawn at `size`. Likewise.
+    func detailControls(in size: CGSize) -> [TileControl]
 }
 
 extension DockWidget {
+    func controls(in size: CGSize, scale: CGFloat) -> [TileControl] { [] }
+    func detailControls(in size: CGSize) -> [TileControl] { [] }
+
     /// Scheduler entry point: read on the calling (background) queue, then hop
     /// to the main actor to publish. The gate delays publishing while the
     /// panel is off screen.

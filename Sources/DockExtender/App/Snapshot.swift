@@ -35,7 +35,11 @@ enum Snapshot {
     /// the SDK no longer declares it for Swift.
     static func capture(window: NSWindow, to url: URL) {
         typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
-        guard let symbol = dlsym(dlopen(nil, RTLD_LAZY), "CGWindowListCreateImage") else { return }
+        // A window that has never been on screen has no number yet, and
+        // nothing to capture.
+        guard window.windowNumber > 0,
+              let symbol = dlsym(dlopen(nil, RTLD_LAZY), "CGWindowListCreateImage")
+        else { return }
         let createImage = unsafeBitCast(symbol, to: CreateImage.self)
         let includingWindow: UInt32 = 1 << 3
         let bestResolution: UInt32 = 1 << 3
@@ -48,7 +52,7 @@ enum Snapshot {
     private static func bar(_ widgets: [any DockWidget], scheme: ColorScheme) -> some View {
         HStack(spacing: 4) {
             ForEach(widgets.indices, id: \.self) { index in
-                widgets[index].tileView.frame(width: 57, height: 57)
+                widgets[index].tileView.frame(width: 57 * widgets[index].info.widthFactor, height: 57)
             }
         }
         .padding(8)
