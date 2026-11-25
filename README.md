@@ -1,8 +1,8 @@
 # Dock Extender
 
 A small native macOS app that adds a bar of live widgets next to the Dock. It
-sits beside the Dock, uses the same glass material and icon size, and slides in
-and out together with an auto-hiding Dock.
+sits beside the Dock, uses the same glass material, is exactly as tall as the
+Dock at any Dock size, and slides in and out together with an auto-hiding Dock.
 
 Included widgets: CPU, memory, GPU, network and disk.
 
@@ -98,8 +98,17 @@ appears, so:
   places the bar in the screen corner.
 - Whether the Dock is showing is inferred from the pointer (it must rest on the
   Dock's screen edge) and from whether the Dock's window is on screen.
+- How tall the Dock is cannot be worked out from its size setting: the Dock
+  pads bigger icons more, and shrinks its icons when they would not fit the
+  screen. So the app measures it. While the Dock is up it asks the window
+  server which window a click would land in, at points further and further
+  from the screen edge, until the answer is no longer the Dock (`DockProbe`).
+  The result is remembered for each Dock size, also between launches. At a
+  size it has not seen before the bar starts from an estimate and is
+  corrected the moment the Dock is next on screen. A Dock that is always
+  showing needs none of this: the system reports the space reserved for it.
 
-Neither needs Accessibility or Screen Recording permission.
+None of this needs Accessibility or Screen Recording permission.
 
 ## Performance notes
 
@@ -108,10 +117,13 @@ Neither needs Accessibility or Screen Recording permission.
   and the graphs catch up in one step as the bar slides in.
 - Dock tracking polls at 10 Hz when the pointer is far from the Dock and only
   speeds up while the pointer is on the Dock's edge or the bar is showing.
+- Measuring the Dock takes six window-server queries (a quarter of a
+  millisecond), once every two seconds and only while the Dock is up.
 - Everything pauses while the display sleeps.
 
 ## Debugging
 
-- `DockExtender --debug` logs Dock geometry and show/hide decisions to stderr.
+- `DockExtender --debug` logs Dock geometry, Dock measurements and show/hide
+  decisions to stderr.
 - `DockExtender --snapshot out.png` renders every tile and detail view to
   `out.png` after a few samples, captures the live panel, then quits.

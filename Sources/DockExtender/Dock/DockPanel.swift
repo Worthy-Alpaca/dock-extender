@@ -73,6 +73,8 @@ final class WindowSlider: NSObject {
         self.window = window
     }
 
+    var isRunning: Bool { link != nil }
+
     func slide(
         to frame: CGRect,
         duration: TimeInterval,

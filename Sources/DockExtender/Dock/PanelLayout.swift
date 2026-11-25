@@ -1,7 +1,8 @@
 import Foundation
 
 /// Frames for the panel window, the glass bar inside it and each tile.
-/// Pure geometry: derived entirely from the Dock's position and the widget list.
+/// Pure geometry: derived entirely from the Dock's position and size and the
+/// widget list.
 struct PanelLayout: Equatable {
     /// Window frame when the panel is showing (screen coordinates).
     var shownFrame: CGRect
@@ -18,12 +19,16 @@ struct PanelLayout: Equatable {
     var edge: DockEdge
 
     private enum Metric {
-        /// Gap between the screen edge and the bar, like the Dock's own.
-        static let edgeGap: CGFloat = 5
-        /// Slack between the bar and the inner edge of the Dock's strip.
-        static let innerGap: CGFloat = 1
-        /// Space between the bar's edge and the tiles.
-        static let padding: CGFloat = 8
+        /// Margin the Dock's bar keeps inside its strip: the gap to the screen
+        /// edge, and the same again on the side facing the desktop.
+        static let margin: CGFloat = 5
+        /// Share of the bar's thickness left free on each side of the tiles.
+        /// The Dock pads bigger icons more, so this is a share, not a fixed
+        /// size: the bar looks the same at every Dock size, only scaled.
+        static let paddingShare: CGFloat = 0.115
+        /// Thinnest bar that still holds something readable.
+        static let minimumBar: CGFloat = 30
+        /// Gap between tiles, the same as between the Dock's icons.
         static let tileSpacing: CGFloat = 4
         /// Gap between the Dock and the bar.
         static let dockGap: CGFloat = 8
@@ -38,8 +43,12 @@ struct PanelLayout: Equatable {
 
     static func make(dock: DockGeometry, side: Settings.Side, widthFactors: [CGFloat]) -> PanelLayout {
         let horizontal = dock.edge == .bottom
-        let tile = max(24, dock.thickness - Metric.edgeGap - Metric.innerGap - 2 * Metric.padding)
-        let barThickness = tile + 2 * Metric.padding
+        // The bar is exactly as thick as the Dock's own, which fills its strip
+        // but for the margins. Everything inside follows from that. Padding
+        // lands on half points so the tiles stay on whole pixels.
+        let barThickness = max(Metric.minimumBar, dock.thickness - 2 * Metric.margin)
+        let padding = (barThickness * Metric.paddingShare * 2).rounded() / 2
+        let tile = barThickness - 2 * padding
         let lengths = widthFactors.map { horizontal ? tile * $0 : tile }
 
         // Room along the Dock's edge on the chosen side. In a vertical Dock
@@ -60,7 +69,7 @@ struct PanelLayout: Equatable {
 
         // Shrink tiles to fit; if that is not enough, show as many as fit.
         func chrome(_ count: Int) -> CGFloat {
-            2 * Metric.padding + Metric.tileSpacing * CGFloat(max(count - 1, 0))
+            2 * padding + Metric.tileSpacing * CGFloat(max(count - 1, 0))
         }
         func fittingScale(_ count: Int) -> CGFloat {
             let total = lengths.prefix(count).reduce(0, +)
@@ -87,7 +96,7 @@ struct PanelLayout: Equatable {
         start = min(max(start, lowest), highest)
 
         let shadow = Metric.shadowMargin
-        let depth = Metric.edgeGap + barThickness + shadow
+        let depth = Metric.margin + barThickness + shadow
         let screen = dock.screenFrame
         var shownFrame: CGRect
         var barFrame: CGRect
@@ -96,11 +105,11 @@ struct PanelLayout: Equatable {
         switch dock.edge {
         case .bottom:
             shownFrame = CGRect(x: start - shadow, y: screen.minY, width: barLength + 2 * shadow, height: depth)
-            barFrame = CGRect(x: shadow, y: Metric.edgeGap, width: barLength, height: barThickness)
+            barFrame = CGRect(x: shadow, y: Metric.margin, width: barLength, height: barThickness)
             hiddenFrame = shownFrame.offsetBy(dx: 0, dy: -depth)
         case .left:
             shownFrame = CGRect(x: screen.minX, y: start - shadow, width: depth, height: barLength + 2 * shadow)
-            barFrame = CGRect(x: Metric.edgeGap, y: shadow, width: barThickness, height: barLength)
+            barFrame = CGRect(x: Metric.margin, y: shadow, width: barThickness, height: barLength)
             hiddenFrame = shownFrame.offsetBy(dx: -depth, dy: 0)
         case .right:
             shownFrame = CGRect(x: screen.maxX - depth, y: start - shadow, width: depth, height: barLength + 2 * shadow)
@@ -110,12 +119,12 @@ struct PanelLayout: Equatable {
 
         // Tiles run left to right in a bottom Dock, top to bottom in a side Dock.
         var tileFrames: [CGRect] = []
-        var offset = Metric.padding
+        var offset = padding
         for length in shown {
             if horizontal {
-                tileFrames.append(CGRect(x: offset, y: Metric.padding, width: length, height: tile))
+                tileFrames.append(CGRect(x: offset, y: padding, width: length, height: tile))
             } else {
-                tileFrames.append(CGRect(x: Metric.padding, y: barLength - offset - length, width: tile, height: length))
+                tileFrames.append(CGRect(x: padding, y: barLength - offset - length, width: tile, height: length))
             }
             offset += length + Metric.tileSpacing
         }
@@ -126,7 +135,7 @@ struct PanelLayout: Equatable {
             barFrame: barFrame,
             tileFrames: tileFrames,
             // Concentric with the tiles' own rounded corners.
-            cornerRadius: tile * 0.23 + Metric.padding,
+            cornerRadius: tile * 0.23 + padding,
             contentScale: tile / Metric.designTileSize * scale,
             edge: dock.edge
         )

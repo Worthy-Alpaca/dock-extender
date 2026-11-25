@@ -19,6 +19,8 @@ final class DockPanelController {
     private var tileWidgets: [any DockWidget] = []
     private var tiles: [TileView] = []
     private var layout: PanelLayout?
+    /// Set when a new layout arrives mid-slide; applied once the slide ends.
+    private var needsRelayout = false
     private var isRevealed = false
     private var slideDuration = DockPreferences.slideDuration
 
@@ -142,6 +144,13 @@ final class DockPanelController {
     }
 
     private func relayout() {
+        // Resizing the window under a running slide would make it jump, and
+        // the tiles are about to move anyway: wait for the slide to finish.
+        guard !slider.isRunning else {
+            needsRelayout = true
+            return
+        }
+        needsRelayout = false
         guard let dock = tracker.geometry else { return }
         let fresh = PanelLayout.make(
             dock: dock,
@@ -191,8 +200,9 @@ final class DockPanelController {
                 panel.orderFrontRegardless()
             }
             let started = CACurrentMediaTime()
-            slider.slide(to: layout.shownFrame, duration: slideDuration, curve: .easeOut, on: screen) {
+            slider.slide(to: layout.shownFrame, duration: slideDuration, curve: .easeOut, on: screen) { [weak self] in
                 Log.debug("slide in finished \(Int((CACurrentMediaTime() - started) * 1000)) ms after the decision to show")
+                self?.relayoutIfNeeded()
             }
         } else {
             closePopover()
@@ -204,7 +214,14 @@ final class DockPanelController {
                 self.panel.orderOut(nil)
                 self.scheduler.isPublishing = false
                 self.slideDuration = DockPreferences.slideDuration
+                self.relayoutIfNeeded()
             }
+        }
+    }
+
+    private func relayoutIfNeeded() {
+        if needsRelayout {
+            relayout()
         }
     }
 

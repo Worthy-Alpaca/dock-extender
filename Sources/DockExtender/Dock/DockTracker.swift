@@ -13,6 +13,10 @@ import AppKit
 ///
 /// Polling adapts to what is happening: a slow tick while nothing can change,
 /// a fast one only while the pointer is on the edge or the Dock is up.
+///
+/// How deep an auto-hiding Dock is cannot be read from anywhere either, so
+/// while the Dock is up the tracker measures it (see `DockProbe`) and corrects
+/// the geometry whenever the Dock turns out to be a different size.
 @MainActor
 final class DockTracker {
     private(set) var geometry: DockGeometry?
@@ -46,16 +50,33 @@ final class DockTracker {
         case tracking = 60
     }
 
+    /// Timing of the Dock depth measurements, in seconds.
+    private enum Probe {
+        /// After the Dock appears, before the first reading: it is sliding in.
+        static let settle: CFTimeInterval = 0.3
+        /// Between a reading and the one that confirms it.
+        static let confirm: CFTimeInterval = 0.1
+        /// Between routine readings once the depth is confirmed.
+        static let routine: CFTimeInterval = 2
+    }
+
     private let timer = DispatchSource.makeTimerSource(queue: .main)
     private var rate: Rate?
     private var isPaused = false
     private var armedSince: CFTimeInterval?
     private var lastGeometryCheck: CFTimeInterval = 0
-    private var lastFullGeometryCheck: CFTimeInterval = 0
     private var lastBar: CGRect?
     /// IDs of the Dock's windows, in the form the window-server query takes.
     private var dockWindows: CFArray?
+    /// The same IDs, for comparing against hit-test results.
+    private var dockWindowNumbers: Set<Int> = []
     private var lastWindowLookup: CFTimeInterval = 0
+    /// Depths the Dock has been measured at; outlives the app.
+    private var calibration = DockCalibration.load()
+    /// A depth reading waiting for a second one to confirm it.
+    private var pendingReach: CGFloat?
+    private var nextProbe: CFTimeInterval = 0
+    private var hasLoggedReach = false
     private var trackingTick = 0
     private var screenObserver: NSObjectProtocol?
 
@@ -91,35 +112,23 @@ final class DockTracker {
     func refresh() {
         guard !isPaused else { return }
         lastGeometryCheck = 0
-        lastFullGeometryCheck = 0
         tick()
     }
 
     private func tick() {
         let now = CACurrentMediaTime()
-        if now - lastGeometryCheck >= 0.5 {
+        // Reading the bar's rect is nearly free and changes whenever the Dock
+        // moves, resizes or gains an icon, so every tick looks at it and only
+        // a change sets off the full query (which may talk to the window
+        // server). The slow fallback catches anything that leaves the rect
+        // untouched.
+        let bar = CoreDock.rect
+        if bar != lastBar || now - lastGeometryCheck >= 5 {
+            lastBar = bar
             lastGeometryCheck = now
-            // Reading the bar's rect is nearly free and changes whenever the
-            // Dock moves, resizes or gains an icon, so it gates the full query
-            // (which talks to the window server). The slow fallback catches
-            // anything that leaves the rect untouched.
-            let bar = CoreDock.rect
-            if bar != lastBar || now - lastFullGeometryCheck >= 5 {
-                lastBar = bar
-                lastFullGeometryCheck = now
-                let fresh = DockGeometry.current()
-                if fresh != geometry {
-                    // A Dock that moved to another screen or edge may be
-                    // drawing in different windows.
-                    if fresh?.screenFrame != geometry?.screenFrame || fresh?.edge != geometry?.edge {
-                        lookUpDockWindows(force: true)
-                    }
-                    geometry = fresh
-                    Log.debug("geometry \(String(describing: fresh))")
-                    onGeometryChange?()
-                }
-            }
+            updateGeometry(at: now)
         }
+        measureDock(at: now)
         guard let dock = geometry else { return }
 
         guard dock.autohide, followsDock else {
@@ -136,9 +145,11 @@ final class DockTracker {
             setRate(.tracking)
             trackingTick &+= 1
             if isPinned { return }
-            if depth > dock.thickness + 2 {
+            if depth > dock.thickness + 2, NSEvent.pressedMouseButtons == 0 {
                 // The pointer left the Dock's strip, which is exactly when the
-                // Dock starts sliding away. Leave with it.
+                // Dock starts sliding away. Leave with it. Not during a drag,
+                // though: the Dock stays up for those (resizing it by its
+                // divider is one), so then only its window going away counts.
                 setPresent(false, because: "pointer left the strip, depth \(Int(depth))")
             } else if trackingTick % 2 == 0, !hoverRegion.contains(pointer), !isDockWindowOnScreen() {
                 setPresent(false, because: "Dock window gone, pointer depth \(Int(depth))")
@@ -159,6 +170,11 @@ final class DockTracker {
     private func setPresent(_ present: Bool, because reason: @autoclosure () -> String) {
         guard present != isPresent else { return }
         isPresent = present
+        // A Dock that has just appeared is still sliding in: let it arrive
+        // before measuring it.
+        pendingReach = nil
+        nextProbe = CACurrentMediaTime() + Probe.settle
+        hasLoggedReach = false
         Log.debug("\(present ? "show" : "hide"): \(reason())")
         onPresenceChange?(present)
     }
@@ -172,6 +188,68 @@ final class DockTracker {
             repeating: interval,
             leeway: .nanoseconds(Int(interval * 0.2 * 1_000_000_000))
         )
+    }
+
+    // MARK: - Geometry
+
+    private func updateGeometry(at now: CFTimeInterval) {
+        let fresh = DockGeometry.current(calibration: calibration)
+        guard fresh != geometry else { return }
+        // A Dock that moved to another screen or edge may be drawing in
+        // different windows.
+        if fresh?.screenFrame != geometry?.screenFrame || fresh?.edge != geometry?.edge {
+            lookUpDockWindows(force: true)
+        }
+        geometry = fresh
+        // Whatever changed may have changed the Dock's depth as well, so
+        // measure again now instead of at the next routine reading.
+        pendingReach = nil
+        nextProbe = min(nextProbe, now)
+        Log.debug("geometry \(String(describing: fresh))")
+        onGeometryChange?()
+    }
+
+    /// Measures how deep the Dock is while it is on screen, and corrects the
+    /// geometry once two readings in a row agree. (One reading is not enough:
+    /// taken while the Dock slides in or out, or while it is being resized, it
+    /// catches the Dock on the way to somewhere else.)
+    private func measureDock(at now: CFTimeInterval) {
+        // Only an auto-hiding Dock needs this; one that is always showing
+        // reports its depth through the screen space reserved for it.
+        guard isPresent, now >= nextProbe, let dock = geometry, dock.autohide else { return }
+        nextProbe = now + Probe.confirm
+
+        // Magnified icons reach beyond the Dock, so with magnification on
+        // only measure while the pointer is well clear of it.
+        if CoreDock.magnifies, dock.isNear(NSEvent.mouseLocation) {
+            pendingReach = nil
+            return
+        }
+        guard isDockWindowOnScreen(), let reach = DockProbe.reach(of: dock, windows: dockWindowNumbers) else {
+            pendingReach = nil
+            return
+        }
+        guard reach == pendingReach else {
+            pendingReach = reach
+            return
+        }
+        nextProbe = now + Probe.routine
+
+        if calibration.record(edge: dock.edge, tileSize: dock.tileSize, thickness: reach) {
+            calibration.save()
+        }
+        guard reach != dock.thickness else {
+            if !hasLoggedReach {
+                hasLoggedReach = true
+                Log.debug("Dock measured \(reach) pt deep, as expected")
+            }
+            return
+        }
+        Log.debug("Dock measured \(reach) pt deep, not the \(dock.thickness) expected")
+        var corrected = dock
+        corrected.thickness = reach
+        geometry = corrected
+        onGeometryChange?()
     }
 
     // MARK: - Dock window
@@ -191,6 +269,7 @@ final class DockTracker {
         else {
             // The windows no longer exist: the Dock restarted. Find its new ones.
             self.dockWindows = nil
+            dockWindowNumbers = []
             return false
         }
         return windows.contains { $0[kCGWindowIsOnscreen as String] as? Bool == true }
@@ -209,15 +288,16 @@ final class DockTracker {
 
         let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
         let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
-        var ids: [UnsafeRawPointer?] = list.compactMap { window in
+        let numbers: [UInt] = list.compactMap { window in
             guard window[kCGWindowOwnerName as String] as? String == "Dock",
-                  window[kCGWindowLayer as String] as? Int == dockLevel,
-                  let number = window[kCGWindowNumber as String] as? UInt
+                  window[kCGWindowLayer as String] as? Int == dockLevel
             else { return nil }
-            // The query takes window IDs stored directly as the array's values.
-            return UnsafeRawPointer(bitPattern: number)
+            return window[kCGWindowNumber as String] as? UInt
         }
+        // The query takes window IDs stored directly as the array's values.
+        var ids = numbers.map { UnsafeRawPointer(bitPattern: $0) }
         dockWindows = ids.isEmpty ? nil : CFArrayCreate(kCFAllocatorDefault, &ids, ids.count, nil)
+        dockWindowNumbers = Set(numbers.map { Int($0) })
         Log.debug("found \(ids.count) Dock window(s) in \(Int((CACurrentMediaTime() - now) * 1000)) ms")
     }
 }

@@ -1,6 +1,6 @@
 import AppKit
 
-enum DockEdge: Sendable {
+enum DockEdge: String, Sendable {
     case bottom, left, right
 }
 
@@ -19,6 +19,7 @@ struct DockGeometry: Equatable {
     /// Dock, a y-range for a side Dock. Nil when the bar's position is unknown.
     var span: ClosedRange<CGFloat>?
     /// Depth of the strip the Dock occupies, measured in from the screen edge.
+    /// The Dock's bar floats inside this strip with a small margin either side.
     var thickness: CGFloat
 
     /// How far `point` is from the Dock's screen edge; infinite on other screens.
@@ -31,15 +32,36 @@ struct DockGeometry: Equatable {
         }
     }
 
-    /// Strip depth for an icon size when it cannot be measured (a hidden Dock
-    /// reserves no screen space): icon + padding inside the bar + the gaps
-    /// around it.
-    static func estimatedThickness(tileSize: CGFloat) -> CGFloat {
-        tileSize + 22
+    /// The point `depth` in from the Dock's screen edge, `position` along it.
+    func point(along position: CGFloat, depth: CGFloat) -> CGPoint {
+        switch edge {
+        case .bottom: return CGPoint(x: position, y: screenFrame.minY + depth)
+        case .left: return CGPoint(x: screenFrame.minX + depth, y: position)
+        case .right: return CGPoint(x: screenFrame.maxX - depth, y: position)
+        }
     }
 
+    /// Whether `point` is on or near the Dock, close enough for the Dock to be
+    /// magnifying icons under it.
+    func isNear(_ point: CGPoint) -> Bool {
+        guard let span, depth(of: point) < thickness + 2 * tileSize else { return false }
+        let position = edge == .bottom ? point.x : point.y
+        return position > span.lowerBound - 3 * tileSize && position < span.upperBound + 3 * tileSize
+    }
+
+    /// Strip depth for an icon size, for when no Dock has been measured yet
+    /// (see `DockProbe`).
+    ///
+    /// On macOS 27 the Dock adds 25 pt around its icons at everyday sizes
+    /// (79 pt deep at icon size 54, 92 pt at 67) and less when small (64 pt
+    /// at 45), so this is a starting point, not a rule.
+    static func estimatedThickness(tileSize: CGFloat) -> CGFloat {
+        tileSize + 25
+    }
+
+    /// `calibration`: depths the Dock has been measured at so far.
     @MainActor
-    static func current() -> DockGeometry? {
+    static func current(calibration: DockCalibration? = nil) -> DockGeometry? {
         let screens = NSScreen.screens
         guard let primary = screens.first else { return nil }
 
@@ -56,7 +78,12 @@ struct DockGeometry: Equatable {
 
         let screen = bar.flatMap { screenHosting($0, edge: edge, among: screens) } ?? NSScreen.main ?? primary
         let frame = screen.frame
-        var thickness = estimatedThickness(tileSize: tileSize)
+        // How deep the Dock is, from the best source there is. For an
+        // auto-hiding Dock that is what it measured at this size before, or
+        // failing that an estimate; either way the tracker checks it against
+        // the real Dock the next time the Dock shows.
+        var thickness = calibration?.thickness(edge: edge, tileSize: tileSize)
+            ?? estimatedThickness(tileSize: tileSize)
         var usable = frame
 
         // visibleFrame is a round trip to the window server, so only ask when
@@ -70,6 +97,8 @@ struct DockGeometry: Equatable {
             case .left: reserved = visible.minX - frame.minX
             case .right: reserved = frame.maxX - visible.maxX
             }
+            // A Dock that is always showing says so itself, through the
+            // space the system keeps clear for it.
             if !autohide, reserved > 8 {
                 thickness = reserved
             }

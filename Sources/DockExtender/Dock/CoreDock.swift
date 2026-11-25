@@ -19,6 +19,7 @@ enum CoreDock {
     private static let getOrientation: OrientationFunction? = symbol("CoreDockGetOrientationAndPinning")
     private static let getAutoHide: FlagFunction? = symbol("CoreDockGetAutoHideEnabled")
     private static let getTileSize: FloatFunction? = symbol("CoreDockGetTileSize")
+    private static let getMagnification: FlagFunction? = symbol("CoreDockIsMagnificationEnabled")
 
     private static func symbol<T>(_ name: String) -> T? {
         guard let pointer = dlsym(handle, name) else { return nil }
@@ -52,8 +53,14 @@ enum CoreDock {
         getAutoHide.map { $0() != 0 }
     }
 
-    /// Icon size in points. CoreDock reports the slider position (0...1), which
-    /// maps linearly onto the 16...128 pt range of the `tilesize` preference.
+    /// Whether icons grow under the pointer.
+    static var magnifies: Bool {
+        getMagnification.map { $0() != 0 } ?? false
+    }
+
+    /// Icon size the Dock is set to, in points. CoreDock reports the slider
+    /// position (0...1), which maps linearly onto the 16...128 pt range of the
+    /// `tilesize` preference. A full Dock draws its icons smaller than this.
     static var tileSize: CGFloat? {
         guard let getTileSize else { return nil }
         let position = CGFloat(getTileSize())
